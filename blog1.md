@@ -28,7 +28,7 @@ The callback URL is the address GitHub sends the user back to after they approve
     > *Where do you want the user to be sent after github app does its job?*
 
     I registered every URL I will be using
-Development: http://localhost:3000/api/auth/github/callback
+Development: http://localhost:3000/api/auth/github/callback  
 Production: https://jscrafts.vercel.app/api/auth/github/callback
 
 2. Permissions  
@@ -57,3 +57,130 @@ I added the following environment variable names:
 |GITHUB_APP_ID|A numeric ID for the GitHub App itself |When your application wants to read repositories on its own behalf.|
 |GITHUB_PRIVATE_KEY| A cryptographic key (.pem file) that proves "I really am the GitHub App."|Generating JWTs to authenticate as the GitHub App itself, used later|
 |GITHUB_WEBHOOK_SECRET|A shared password used to verify that incoming webhook requests actually came from GitHub.|The eventual /api/github/webhook route |
+
+## Phase 2: Implement GitHub Login
+Before implementing, understand the actors in our implementation.  
+The browser is the user, your app server, GitHub's website and GitHub's API.   
+We need two separate routes to complete the entire flow.  
+### Route 1: Send the user to GitHub.  
+The URL looks like this:
+```https
+    https://github.com/login/oauth/authorize
+    ?client_id=[GITHUB-CLIENT_ID]
+    &redirect_uri=[CALLBACK_URL]
+````
+The file you need create is `src/app/api/auth/github/route.ts`:
+````js
+export async function GET() {
+  // 1. Read the client ID from env
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  if (!clientId) {
+    return NextResponse.json(
+      { error: 'GitHub client ID is not configured' },
+      { status: 500 },
+    );
+  }
+
+  // 2. Figure out which callback URL to use
+  const redirectUri =
+    process.env.NODE_ENV === 'production'
+      ? 'https://jscrafts.vercel.app/api/auth/github/callback'
+      : 'http://localhost:3000/api/auth/github/callback';
+
+  // 3. Build the GitHub URL
+  const githubUrl = new URL('https://github.com/login/oauth/authorize');
+  githubUrl.searchParams.set('client_id', clientId);
+  githubUrl.searchParams.set('redirect_uri', redirectUri);
+
+  // 4. Send the browser there
+  return NextResponse.redirect(githubUrl);
+}
+````  
+When the browser lands on that URL, github checks the client_id and responds to the real Github App.  
+If they approve --> redirect to the callback url along with `?code=ABC123`  
+If they deny --> redirects back with `?error=access_denied`  
+The code that it sends back when approved is important, its short-lived, single-use and is used with CLIENT_ID for fetching github user details for initial profile building.  
+
+### Route 2: Receive the user back from GitHub  
+The file you need to `src/app/api/auth/github/callback/route.ts`  
+This is the meat of the login. It does four things in order:  
+#### Part 1: Read the code or error
+```js
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const code = searchParams.get('code');
+  const error = searchParams.get('error');
+
+  if (error) {
+    return NextResponse.redirect(new URL('/?error=github_denied', request.url));
+  }
+
+  if (!code) {
+    return NextResponse.redirect(new URL('/?error=missing_code', request.url));
+  }
+  // ... continue
+}
+````  
+#### Part 2: Exchange code for access token  
+```js
+const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+  method: 'POST',
+  headers: {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    client_id: clientId,
+    client_secret: clientSecret,
+    code,
+    redirect_uri: redirectUri,
+  }),
+});
+
+const tokenData = await tokenResponse.json();
+
+if (!tokenResponse.ok || !tokenData.access_token) {
+  return NextResponse.redirect(new URL('/?error=github_token_exchange', request.url));
+}
+````  
+#### Part 3: Fetch the user's profile  
+```js
+const githubUserResponse = await fetch('https://api.github.com/user', {
+  headers: {
+    Authorization: `Bearer ${tokenData.access_token}`,
+    Accept: 'application/vnd.github+json',
+  },
+});
+
+const githubUser = await githubUserResponse.json();
+````  
+GitHub returns something like this:  
+```json
+{
+  "id": 12345678,
+  "login": "rohan",
+  "name": "Rohan",
+  "avatar_url": "https://avatars.githubusercontent.com/u/...",
+  "html_url": "https://github.com/rohan"
+}
+````  
+#### Part 4: Create the JSCrafts user  
+```js
+await connectDB();
+
+const user = await User.findOneAndUpdate(
+  { githubId: String(githubUser.id) },
+  {
+    githubId: String(githubUser.id),
+    username: githubUser.login,
+    displayName: githubUser.name ?? githubUser.login,
+    avatarUrl: githubUser.avatar_url,
+    profileUrl: githubUser.html_url,
+    email: primaryEmail,
+  },
+  {
+    new: true,   // return the updated document
+    upsert: true, // create it if it doesn't exist
+  },
+);
+````  
