@@ -1,6 +1,16 @@
-# Elucidating GitHub App Authentication | Simple Walkthrough 
-
+![alt text](image-2.png)
+# Building GitHub Authentication: From GitHub App Setup to OAuth Callback
 ![alt text](image-1.png)
+
+Ever wondered what actually happens when you click **"Continue with GitHub"** on a website?
+
+For JSCrafts, I needed a way to identify users through their GitHub accounts and connect that identity to my application's user database.
+
+I decided to use a GitHub App and implement the authorization flow in Next.js. In this article, I'll walk through the setup, environment variables, authorization redirect, callback handling, and how I connect the authenticated GitHub profile to my database.
+
+![preview](image.png)
+
+Let's break it down step by step.
 
 ## Table of contents
 
@@ -184,3 +194,30 @@ const user = await User.findOneAndUpdate(
   },
 );
 ````  
+What findOneAndUpdate with upsert: true does:
+
+```txt
+1. Look for a User with githubId = "12345678"
+2. If found → update its fields, return it
+3. If not found → create a new User with all these fields, return it
+This is the classic "find-or-create" pattern. It handles both first-time and returning users in a single query.
+```
+
+*Why use githubId as the key?*
+
+* It's stable — usernames can change, IDs can't.
+
+* It's unique — each GitHub account has exactly one ID.
+
+Why `new: true` ?   
+    Without it, MongoDB returns the old document (before the update). With it, you get the new one, which is what you want for the session step.
+
+---
+## What I Learned
+Building GitHub authentication for JSCrafts helped me understand three important things:
+
+* **Permission scoping matters:** Request only the access your application actually needs.
+* **OAuth security matters:** State validation, secure credential handling, and proper error handling are essential parts of the flow.
+* **Authentication has multiple layers:** Authenticating a user through GitHub is different from authenticating the GitHub App itself.
+
+This is an important step in building JSCrafts. The next step is to ensure that the authorization flow is backed by secure session management and that every protected route checks the user's session
